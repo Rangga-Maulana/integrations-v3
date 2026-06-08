@@ -68,10 +68,7 @@ contract KelpLRTWithdrawer {
     /// @param asset The asset to initiate the withdrawal for
     /// @param rsETHUnstaked The amount of rsETH to unstake
     /// @param referralId The referral ID
-    function initiateWithdrawal(address asset, uint256 rsETHUnstaked, string calldata referralId)
-        external
-        gatewayOnly
-    {
+    function initiateWithdrawal(address asset, uint256 rsETHUnstaked, string calldata referralId) external gatewayOnly {
         if (_getNumRequests(asset) >= 5) {
             revert TooManyRequestsException();
         }
@@ -149,12 +146,13 @@ contract KelpLRTWithdrawer {
 
         for (uint256 i = 0; i < numRequests; i++) {
             (uint256 rsETHAmount, uint256 expectedAssetAmount,, uint256 userNonce) = IKelpLRTWithdrawalManager(
-                withdrawalManager
-            ).getUserWithdrawalRequest(_assetOrETH(asset), address(this), i);
+                    withdrawalManager
+                ).getUserWithdrawalRequest(_assetOrETH(asset), address(this), i);
 
             if (calcPending && userNonce >= nextLockedNonce) {
-                pendingAssets +=
-                    IKelpLRTWithdrawalManager(withdrawalManager).getExpectedAssetAmount(_assetOrETH(asset), rsETHAmount);
+                uint256 currentAssetAmount = IKelpLRTWithdrawalManager(withdrawalManager)
+                    .getExpectedAssetAmount(_assetOrETH(asset), rsETHAmount);
+                pendingAssets += currentAssetAmount < expectedAssetAmount ? currentAssetAmount : expectedAssetAmount;
             }
 
             if (calcClaimable && userNonce < nextLockedNonce) {
