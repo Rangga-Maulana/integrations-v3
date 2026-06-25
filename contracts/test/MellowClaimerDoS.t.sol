@@ -5,13 +5,11 @@ import {Test} from "forge-std/Test.sol";
 
 // --- MOCKS ---
 
-// Mocking the underlying asset (e.g., WETH)
 contract MockAsset {
     mapping(address => uint256) public balanceOf;
     function mint(address to, uint256 amount) external { balanceOf[to] += amount; }
 }
 
-// Mocking the external Mellow Claimer contract
 contract MockMellowClaimer {
     MockAsset public asset;
     uint256 public claimableAmount;
@@ -19,7 +17,6 @@ contract MockMellowClaimer {
     constructor(MockAsset _asset) { asset = _asset; }
     function setClaimableAmount(uint256 amount) external { claimableAmount = amount; }
 
-    // Simulates multiAcceptAndClaim: only transfers mature (claimable) assets, not pending ones
     function multiAcceptAndClaim(address recipient, uint256 maxAssets) external returns (uint256) {
         uint256 toClaim = claimableAmount;
         if (toClaim > maxAssets) toClaim = maxAssets;
@@ -29,7 +26,6 @@ contract MockMellowClaimer {
 }
 
 // --- VULNERABLE LOGIC HARNESS ---
-// This contract contains the exact vulnerable logic from MellowClaimerAdapter._claim
 contract VulnerableMellowAdapter {
     uint256 public constant MAX_ASSETS_BUFFER = 100;
     error InsufficientClaimedException();
@@ -42,10 +38,8 @@ contract VulnerableMellowAdapter {
     ) external {
         uint256 assetBalanceBefore = asset.balanceOf(creditAccount);
         
-        // External call to Mellow (only claims mature assets)
         claimer.multiAcceptAndClaim(creditAccount, maxAssets);
 
-        // === VULNERABLE CODE BLOCK (Copied from MellowClaimerAdapter.sol) ===
         if (maxAssets < MAX_ASSETS_BUFFER) return;
         maxAssets -= MAX_ASSETS_BUFFER;
 
@@ -53,7 +47,34 @@ contract VulnerableMellowAdapter {
         if (assetBalanceAfter - assetBalanceBefore < maxAssets) {
             revert InsufficientClaimedException();
         }
-        // ====================================================================
+    }
+}
+
+// --- MOCKING GEARBOX CREDIT FACADE ---
+// Mensimulasikan bagaimana CreditFacade mengubah type(uint256).max dan mengeksekusi multicall
+contract MockCreditFacade {
+    VulnerableMellowAdapter public adapter;
+    MockAsset public asset;
+    MockMellowClaimer public claimer;
+
+    constructor(VulnerableMellowAdapter _adapter, MockAsset _asset, MockMellowClaimer _claimer) {
+        adapter = _adapter;
+        asset = _asset;
+        claimer = _claimer;
+    }
+
+    // Simulasi withdrawCollateral & liquidateCreditAccount yang memanggil adapter di dalam multicall
+    function executeWithdrawOrLiquidate(address creditAccount, uint256 amount) external {
+        if (amount == type(uint256).max) {
+            // Gearbox CreditFacadeV3 logic untuk type(uint256).max
+            uint256 phantomBalance = 1010e18; // 1000 pending + 10 claimable
+            amount = phantomBalance - 1;
+        }
+        
+        // Memanggil adapter (yang akan revert)
+        uint256[] memory subvaultIndices = new uint256[](0);
+        uint256[][] memory indices = new uint256[][](0);
+        adapter.claimLogic(asset, claimer, creditAccount, amount);
     }
 }
 
@@ -62,38 +83,44 @@ contract MellowClaimerDoSTest is Test {
     MockAsset public asset;
     MockMellowClaimer public claimer;
     VulnerableMellowAdapter public adapter;
+    MockCreditFacade public facade;
     
-    address creditAccount = address(this);
+    address user = address(0xA1);
+    address liquidator = address(0xB2);
 
     function setUp() public {
         asset = new MockAsset();
         claimer = new MockMellowClaimer(asset);
         adapter = new VulnerableMellowAdapter();
+        facade = new MockCreditFacade(adapter, asset, claimer);
+
+        // Setup state: 10e18 mature, 1000e18 pending
+        claimer.setClaimableAmount(10e18);
     }
 
-    function test_PoC_EndToEnd_MellowClaimerDoS() public {
-        // 1. BEFORE EXPLOIT: Setup Mellow Vault state
-        // User has 1000e18 pending (unbonding) and 10e18 claimable (mature)
-        uint256 pendingAssets = 1000e18;
-        uint256 claimableAssets = 10e18;
-        claimer.setClaimableAmount(claimableAssets);
+    function test_PoC_UserWithdrawStuck() public {
+        // 1. BEFORE: Saldo user 0
+        assertEq(asset.balanceOf(user), 0, "User initial balance should be 0");
 
-        // Verify initial balance is 0
-        assertEq(asset.balanceOf(creditAccount), 0, "Initial balance should be 0");
-
-        // 2. SIMULATE GEARBOX CREDIT FACADE BEHAVIOR
-        // User calls withdrawCollateral(phantomToken, type(uint256).max)
-        // CreditFacade converts type(uint256).max to balanceOf(phantomToken) - 1
-        uint256 phantomBalance = pendingAssets + claimableAssets;
-        uint256 maxAssetsRequestedByGearbox = phantomBalance - 1;
-
-        // 3. EXECUTION & IMPACT
-        // We expect the transaction to REVERT because maxAssets is vastly larger than the assets received
+        // 2. EXECUTION: User mencoba withdraw pakai type(uint256).max
+        vm.prank(user);
         vm.expectRevert(VulnerableMellowAdapter.InsufficientClaimedException.selector);
-        adapter.claimLogic(asset, claimer, creditAccount, maxAssetsRequestedByGearbox);
+        facade.executeWithdrawOrLiquidate(user, type(uint256).max);
 
-        // 4. AFTER EXPLOIT VERIFICATION
-        // Verify that user funds are completely stuck (balance remains 0 despite 10e18 being claimable)
-        assertEq(asset.balanceOf(creditAccount), 0, "User funds are stuck! DoS Confirmed.");
+        // 3. AFTER IMPACT 1: Dana user stuck (tidak bisa diwithdraw)
+        assertEq(asset.balanceOf(user), 0, "IMPACT 1: User funds are stuck! User DoS Confirmed.");
+    }
+
+    function test_PoC_LiquidationDoS() public {
+        // 1. BEFORE: Saldo liquidator 0
+        assertEq(asset.balanceOf(liquidator), 0, "Liquidator initial balance should be 0");
+
+        // 2. EXECUTION: Liquidator mencoba melikuidasi akun (juga memakai type(uint256).max di internal multicallnya)
+        vm.prank(liquidator);
+        vm.expectRevert(VulnerableMellowAdapter.InsufficientClaimedException.selector);
+        facade.executeWithdrawOrLiquidate(liquidator, type(uint256).max);
+
+        // 3. AFTER IMPACT 2: Likuidasi gagal, liquidator tidak dapat apa-apa, akun tidak bisa dilikuidasi
+        assertEq(asset.balanceOf(liquidator), 0, "IMPACT 2: Liquidation failed! Liquidation DoS Confirmed.");
     }
 }
