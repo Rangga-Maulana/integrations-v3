@@ -51,7 +51,7 @@ contract VulnerableMellowAdapter {
 }
 
 // --- MOCKING GEARBOX CREDIT FACADE ---
-// Mensimulasikan bagaimana CreditFacade mengubah type(uint256).max dan mengeksekusi multicall
+// Simulates how CreditFacade converts type(uint256).max and executes the multicall
 contract MockCreditFacade {
     VulnerableMellowAdapter public adapter;
     MockAsset public asset;
@@ -63,15 +63,15 @@ contract MockCreditFacade {
         claimer = _claimer;
     }
 
-    // Simulasi withdrawCollateral & liquidateCreditAccount yang memanggil adapter di dalam multicall
+    // Simulates withdrawCollateral & liquidateCreditAccount which calls the adapter inside a multicall
     function executeWithdrawOrLiquidate(address creditAccount, uint256 amount) external {
         if (amount == type(uint256).max) {
-            // Gearbox CreditFacadeV3 logic untuk type(uint256).max
+            // Gearbox CreditFacadeV3 logic for type(uint256).max
             uint256 phantomBalance = 1010e18; // 1000 pending + 10 claimable
             amount = phantomBalance - 1;
         }
         
-        // Memanggil adapter (yang akan revert)
+        // Calls the adapter (which will revert)
         uint256[] memory subvaultIndices = new uint256[](0);
         uint256[][] memory indices = new uint256[][](0);
         adapter.claimLogic(asset, claimer, creditAccount, amount);
@@ -99,28 +99,28 @@ contract MellowClaimerDoSTest is Test {
     }
 
     function test_PoC_UserWithdrawStuck() public {
-        // 1. BEFORE: Saldo user 0
+        // 1. BEFORE: User balance is 0
         assertEq(asset.balanceOf(user), 0, "User initial balance should be 0");
 
-        // 2. EXECUTION: User mencoba withdraw pakai type(uint256).max
+        // 2. EXECUTION: User tries to withdraw using type(uint256).max
         vm.prank(user);
         vm.expectRevert(VulnerableMellowAdapter.InsufficientClaimedException.selector);
         facade.executeWithdrawOrLiquidate(user, type(uint256).max);
 
-        // 3. AFTER IMPACT 1: Dana user stuck (tidak bisa diwithdraw)
+        // 3. AFTER IMPACT 1: User funds are stuck (cannot be withdrawn)
         assertEq(asset.balanceOf(user), 0, "IMPACT 1: User funds are stuck! User DoS Confirmed.");
     }
 
     function test_PoC_LiquidationDoS() public {
-        // 1. BEFORE: Saldo liquidator 0
+        // 1. BEFORE: Liquidator balance is 0
         assertEq(asset.balanceOf(liquidator), 0, "Liquidator initial balance should be 0");
 
-        // 2. EXECUTION: Liquidator mencoba melikuidasi akun (juga memakai type(uint256).max di internal multicallnya)
+        // 2. EXECUTION: Liquidator tries to liquidate the account (also using type(uint256).max in its internal multicall)
         vm.prank(liquidator);
         vm.expectRevert(VulnerableMellowAdapter.InsufficientClaimedException.selector);
         facade.executeWithdrawOrLiquidate(liquidator, type(uint256).max);
 
-        // 3. AFTER IMPACT 2: Likuidasi gagal, liquidator tidak dapat apa-apa, akun tidak bisa dilikuidasi
+        // 3. AFTER IMPACT 2: Liquidation fails, liquidator gets nothing, account cannot be liquidated
         assertEq(asset.balanceOf(liquidator), 0, "IMPACT 2: Liquidation failed! Liquidation DoS Confirmed.");
     }
 }
